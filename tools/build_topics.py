@@ -13,10 +13,16 @@
 from __future__ import annotations
 
 import csv
+import html
 import io
 import json
+import re
+import shutil
+import subprocess
 import sys
+import zipfile
 import datetime as dt
+import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
 from statistics import mean
@@ -726,6 +732,136 @@ topic(
     caveat="ERA5 강설량은 재분석 모델이 계산한 '새로 내린 눈'의 양이라, 기상청이 "
            "재는 적설(쌓인 눈의 깊이)과 다릅니다. 같은 날도 기상청 서울 기록과 "
            "값이 크게 다를 수 있습니다.")
+
+# ── 12. 일과 만족 ────────────────────────────────────────────────
+# 원본이 셋이고 모양이 다 다르다 — 보고서 PDF · 통계표 xlsx · 지표 화면의 HTML 표.
+# 셋 다 표준 라이브러리로 읽되, PDF 글자만은 pdftotext(Git for Windows 에 들어 있다)를 빌린다
+XL = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+XL_REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+
+
+def load_xlsx(name, sheet):
+    """시트 하나를 행 목록으로. 빈 칸도 자리를 지켜야 열 위치가 맞는다."""
+    z = zipfile.ZipFile(RAW / name)
+    ss = ["".join(t.text or "" for t in si.iter(XL + "t"))
+          for si in ET.fromstring(z.read("xl/sharedStrings.xml")).iter(XL + "si")]
+    rels = {r.get("Id"): r.get("Target") for r in
+            ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))}
+    sh = next(s for s in ET.fromstring(z.read("xl/workbook.xml")).iter(XL + "sheet")
+              if s.get("name").strip() == sheet)
+    path = "xl/" + rels[sh.get(XL_REL)].removeprefix("/xl/").removeprefix("xl/")
+    rows = []
+    for row in ET.fromstring(z.read(path)).iter(XL + "row"):
+        r = []
+        for c in row.iter(XL + "c"):
+            col = 0
+            for ch in re.match(r"[A-Z]+", c.get("r")).group():
+                col = col * 26 + ord(ch) - 64
+            v = c.find(XL + "v")
+            val = None if v is None else ss[int(v.text)] if c.get("t") == "s" else v.text
+            r += [None] * (col - 1 - len(r)) + [val]
+        rows.append(r)
+    return rows
+
+
+def xlsx_value(rows, row_label, col_label, block=None):
+    """표에서 (행 이름, 열 이름) 한 칸을 찾는다. 위치 번호를 손으로 적지 않는다.
+
+    39번 표처럼 한 시트에 여러 표가 나란히 있으면 block(표 제목)으로 먼저 찾아,
+    그 표의 열 범위 안에서만 찾는다.
+    """
+    def cell(r, c):
+        return (str(rows[r][c]) if c < len(rows[r]) and rows[r][c] else "").replace("\n", "").replace(" ", "")
+    top, left = 0, 0
+    if block:
+        top, left = next((r, c - 1) for r in range(len(rows))
+                         for c in range(len(rows[r])) if cell(r, c) == block.replace(" ", ""))
+    width = range(left, left + 10)
+    col = next(c for r in range(8) for c in width if cell(r, c) == col_label)
+    row = next(r for r in range(top, len(rows)) if cell(r, left) == row_label)
+    return float(rows[row][col])
+
+
+def pdf_text(name):
+    exe = shutil.which("pdftotext") or r"C:\Program Files\Git\ucrt64\bin\pdftotext.exe"
+    return subprocess.run([exe, "-enc", "UTF-8", str(RAW / name), "-"],
+                          capture_output=True, check=True).stdout.decode("utf-8")
+
+
+# 1번: 보고서가 문장으로 밝힌 업무목적 활용률. 요약과 본문 두 곳의 숫자가 같은지도 본다
+bok = re.sub(r"\s+", " ", pdf_text("bok_genai_2025.pdf"))
+ai_found = re.findall(r"업무 (?:용도|목적)으로 한정할 경우에도 활용률이 ([\d.]+)%", bok)
+assert ai_found and len(set(ai_found)) == 1, f"업무목적 활용률을 못 찾았거나 서로 다릅니다: {ai_found}"
+ai_work = float(ai_found[0])
+ai_survey = re.search(r"조 ?사 ?기간은 (\d{4}년 \d+월 \d+일)부터 (\d+월 \d+일)까", bok).groups()
+
+# 2·3·5번: 2025년 사회조사 통계표. '만족'은 매우 + 약간 만족을 합쳐 공표한 열을 그대로 쓴다
+sat_all = xlsx_value(load_xlsx("social_survey_2025.xlsx", "39-1"),
+                     "<2025>", "만족", block="< 전반적인 일자리 만족도 >")
+sat_pay = xlsx_value(load_xlsx("social_survey_2025.xlsx", "39-1"),
+                     "<2025>", "만족", block="< 임금: 하는 일과 비교하여 >")
+balance = xlsx_value(load_xlsx("social_survey_2025.xlsx", "38"), "<2025>", "둘다비슷하다")
+# 공표된 '만족'은 반올림 전 값으로 합친 것이라, 반올림된 두 칸을 더하면 어긋날 수 있다
+pay_sum = sum(xlsx_value(load_xlsx("social_survey_2025.xlsx", "39-1"), "<2025>", c,
+                         block="< 임금: 하는 일과 비교하여 >") for c in ("매우만족", "약간만족"))
+
+# 4번: e-나라지표 통계표(HTML). '전체' 행이 남녀를 합친 공표값이다
+_tb = re.sub(r"(?s)<(script|style).*?</\1>", "", io.open(RAW / "index_tenure_2025.html",
+                                                       encoding="utf-8").read())
+_tr = [[html.unescape(re.sub(r"<[^>]+>", "", c)).strip()
+        for c in re.findall(r"(?s)<t[hd][^>]*>(.*?)</t[hd]>", tr)]
+       for tr in re.findall(r"(?s)<tr.*?</tr>", _tb)]
+tenure_year = next(r[-1] for r in _tr if r and r[-1].isdigit() and len(r[-1]) == 4)
+tenure = float(next(r[-1] for r in _tr if "전체" in r))
+
+topic(
+    "work-life", "💼", "일하는 우리, 얼마나 만족할까",
+    "2025년 조사로 본 일터의 숫자 — AI 활용 · 만족도 · 근속",
+    "국가데이터처 2025년 사회조사 · 한국은행 · e-나라지표",
+    "https://mods.go.kr/board.es?act=view&bid=219&list_no=439196&mid=a10301060100",
+    [
+        slider("k1", "한국은행이 2025년에 발표한 조사에서, 근로자 중 업무 목적으로 "
+               "생성형 AI를 활용한 비율은 몇 %일까요?",
+               ai_work, "%", 0, 100, 1,
+               f"한국은행 BOK 이슈노트 제2025-22호가 {ai_survey[0]}~{ai_survey[1]} "
+               f"근로자 웹 조사로 밝힌 업무 목적 생성형 AI 활용률 {ai_work:.1f}%",
+               "AI 는 '아직 일부만 쓰는 도구'로 느껴지지만, 시험 삼아 써 본 사람까지 "
+               "세면 이미 절반을 넘습니다."),
+        slider("k2", "2025년 사회조사에서, 임금근로자 중 자신의 일자리에 전반적으로 "
+               "만족한다고 응답한 비율은 몇 %일까요?",
+               sat_all, "%", 0, 100, 1,
+               f"2025년 사회조사 임금근로자의 전반적인 일자리 만족도에서 '매우 만족'과 "
+               f"'약간 만족'을 합친 공표값 {sat_all:.1f}%",
+               "불만은 크게 들리고 만족은 조용합니다. 그래도 '보통'이 가장 많아서 "
+               "만족이 과반은 아닙니다."),
+        slider("k3", "2025년 사회조사에서, 19세 이상 인구 중 일과 가정생활의 균형을 "
+               "중요하게 생각하는 비율은 몇 %일까요?",
+               balance, "%", 0, 100, 1,
+               f"2025년 사회조사 일과 가정생활 우선도에서 '둘 다 비슷하다'를 고른 "
+               f"전국 응답 비율 {balance:.1f}% (표의 대상은 지난 1주일 동안 일한 "
+               f"19세 이상)",
+               "'워라밸'이 유행어라 대다수가 균형을 고를 것 같지만, 일을 앞세우는 "
+               "사람도 셋 중 하나꼴입니다."),
+        slider("k4", "2025년 대한민국 임금근로자의 현재 직장 평균 근속기간은 몇 년일까요?",
+               tenure, "년", 0, 20, 0.1,
+               f"e-나라지표 임금근로자 근속연수 {tenure_year}년 전 산업 '전체'(남녀 합계) "
+               f"{tenure:.1f}년 (고용노동부 고용형태별근로실태조사, 6월 기준)",
+               "주변의 이직 이야기가 많으면 짧게, 한 직장 30년 이야기를 떠올리면 "
+               "길게 잡게 됩니다."),
+        slider("k5", "2025년 사회조사에서, 임금근로자 중 ‘하는 일과 비교해 임금에 "
+               "만족한다’고 응답한 비율은 몇 %일까요?",
+               sat_pay, "%", 0, 100, 1,
+               f"2025년 사회조사 근로 여건 만족도 '임금: 하는 일과 비교하여'에서 "
+               f"'매우 만족'과 '약간 만족'을 합친 공표값 {sat_pay:.1f}%",
+               "일자리 전체로는 만족해도 임금만 따로 물으면 만족이 눈에 띄게 "
+               "줄어듭니다."),
+    ],
+    caveat="1번은 만 15~64세 취업자 웹 패널 조사에서 시험 삼아 써 본 사람까지 센 값이고, "
+           "3번은 19세 이상 전체가 아니라 지난 1주일 동안 일한 사람만 대상이며, "
+           f"4번은 임시·일용직과 5인 미만 사업체를 뺀 상용근로자의 {tenure_year}년 6월 "
+           "기준 값이고, 5번은 '매우 만족'과 '약간 만족'을 더하면 "
+           f"{pay_sum:.1f}%라 공표값 {sat_pay:.1f}%와 어긋나서, 다른 곳에서 본 숫자와 "
+           "다를 수 있습니다.")
 
 
 # ════════════════════════════════════════════════════════════════

@@ -124,6 +124,26 @@ SOURCES: list[tuple[str, str, str]] = [
      "?format=geojson&starttime=2000-01-01&endtime=2024-12-31"
      "&minmagnitude=3.0&minlatitude=33&maxlatitude=39.5"
      "&minlongitude=124&maxlongitude=132&limit=20000"),
+
+    # 표가 아니라 보고서(PDF) 한 건이다. 조사 기간 2025-05-19~06-17, 발간 2025-08-18.
+    # 업무목적 생성형 AI 활용률(<그림 1>·<그림 2>)이 본문 그림 안에 숫자로 들어 있다
+    ("bok_genai_2025.pdf",
+     "근로자 생성형 AI 활용률 2025 (한국은행 BOK 이슈노트 제2025-22호)",
+     "https://www.bok.or.kr/fileSrc/portal/4328064bf5fa45ac8b118692ba3c4644/1/"
+     "dc9d59003d50427d8735ee8830d4b853.pdf"),
+
+    # 보도자료 첨부 3개(hwp·xlsx·pdf) 중 seq=2 가 통계표 xlsx 다. 시트 63개 · 2023·2025 비교.
+    # 일과 가정생활 우선도는 시트 38, 근로 여건 만족도(전반적 · 임금 등)는 시트 39-1~39-3
+    ("social_survey_2025.xlsx",
+     "2025년 사회조사 통계표 — 복지·사회참여·여가·소득과 소비·노동 (국가데이터처, 2025-11-11 공표)",
+     "https://mods.go.kr/boardDownload.es?bid=219&list_no=439196&seq=2"),
+
+    # e-나라지표 화면 안의 통계표(iframe)를 그대로 받는다. 엑셀 버튼은 POST 라 get() 으로 못 받는다.
+    # 연도 자료(2002~)이고 period=시작:끝 으로 기간을 고른다. 표는 HTML <table> 안에 있다
+    ("index_tenure_2025.html",
+     "임금근로자 근속연수 2025 (e-나라지표 F0120 · 고용노동부 고용형태별근로실태조사, 단위 년)",
+     "https://www.index.go.kr/unity/potal/eNara/sub/showStblGams3.do"
+     "?stts_cd=F012001&idx_cd=F0120&freq=Y&period=2025:2025"),
 ]
 
 
