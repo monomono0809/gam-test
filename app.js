@@ -8,7 +8,8 @@ const $ = (id) => document.getElementById(id);
 const views = { home: $("view-home"), quiz: $("view-quiz"), result: $("view-result") };
 
 let INDEX = null;     // topics.json
-let PACK = null;      // 지금 푸는 주제
+let HOME = null;      // 주제가 하나뿐이면 그 주제 — 첫 화면에 문항 카드를 하나씩 깐다
+let PACK = null;      // 지금 푸는 주제 (문항 카드를 눌렀으면 그 문항 하나만 담긴다)
 let idx = 0;
 let answers = [];
 
@@ -19,6 +20,10 @@ const DONE_KEY = "gam-test-done";
 function doneMap() {
   try { return JSON.parse(localStorage.getItem(DONE_KEY) || "{}"); }
   catch { return {}; }
+}
+/* 문항 하나만 풀었으면 '주제#번호' 로 따로 기억한다 */
+function doneId(pack) {
+  return pack.qi == null ? pack.id : `${pack.id}#${pack.qi}`;
 }
 function markDone(id, score) {
   try {
@@ -67,14 +72,18 @@ function directionOf(q, mine) {
 
 function show(name) {
   Object.entries(views).forEach(([k, el]) => (el.hidden = k !== name));
+  document.body.dataset.view = name;   // 화면마다 배경 그림을 덮는 정도가 다르다 (style.css)
   window.scrollTo({ top: 0 });
 }
 
 /* ── 시작 ────────────────────────────────────────── */
 async function boot() {
-  INDEX = await (await fetch("topics.json")).json();
-  $("title").textContent = INDEX.title;
+  INDEX = await (await fetch("topics.json", { cache: "no-cache" })).json();
+  renderTitle(INDEX.title);
   $("subtitle").textContent = INDEX.subtitle;
+  if (INDEX.topics.length === 1) {
+    HOME = await (await fetch(`topics/${INDEX.topics[0].id}.json`, { cache: "no-cache" })).json();
+  }
 
   const p = new URLSearchParams(location.search);
   if (p.has("s")) {
@@ -93,12 +102,64 @@ async function boot() {
   $("btn-share").onclick = share;
   if (p.has("t")) {
     const t = INDEX.topics.find((x) => x.id === p.get("t"));
-    if (t && !p.has("s")) start(t.id);
+    const qi = p.has("q") ? Number(p.get("q")) : null;
+    if (t && !p.has("s")) start(t.id, qi);
   }
+}
+
+/* 시안3 의 흰 선 아이콘. 문항의 icon 이 여기 이름이면 그림으로, 아니면 글자(이모지) 그대로 */
+const ICONS = {
+  chip: '<rect x="7" y="7" width="10" height="10" rx="2"/><path d="M10 10h4v4h-4zM9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/>',
+  chart: '<path d="M5 20v-4M10 20v-8M15 20V9M20 20V4"/>',
+  scale: '<path d="M12 4v16M8 20h8M5 7h14M2 13l3-6 3 6a3 3 0 0 1-6 0zM16 13l3-6 3 6a3 3 0 0 1-6 0z"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  coins: '<ellipse cx="12" cy="6" rx="7" ry="2.5"/><path d="M5 6v4c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V6M5 10v4c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-4M5 14v4c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-4"/>',
+};
+const svg = (d) =>
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" ` +
+  `stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+
+/* 제목을 두 줄로 — 마지막 두 낱말("감 테스트")은 연두로, 끝에 연두 점.
+   끝에 붙은 이모지는 화면 제목에서만 뺀다 (공유 문구에는 그대로 남는다) */
+function renderTitle(title) {
+  const words = title.replace(/\s*\p{Extended_Pictographic}+\uFE0F?$/u, "").split(" ");
+  const head = words.slice(0, -2).join(" ");
+  const tail = words.slice(-2).join(" ");
+  const el = $("title");
+  el.textContent = "";
+  if (head) el.append(head, document.createElement("br"));
+  const hl = document.createElement("span");
+  hl.className = "hl"; hl.textContent = tail;
+  const dot = document.createElement("span");
+  dot.className = "dot"; dot.textContent = ".";
+  el.append(hl, dot);
 }
 
 function renderGrid() {
   const done = doneMap();
+  if (HOME) {
+    // 시안2 + 3 — 문항마다 유리 카드 한 장. 누르면 그 문항 하나만 푼다
+    const ids = HOME.questions.map((_, i) => `${HOME.id}#${i}`);
+    const n = ids.filter((k) => k in done).length;
+    $("progress-note").textContent =
+      n ? `${ids.length}개 중 ${n}개 풀었습니다` : "";
+    $("topic-grid").innerHTML = "";
+    HOME.questions.forEach((q, i) => {
+      const k = ids[i];
+      const b = document.createElement("button");
+      b.className = "tcard" + (k in done ? " done" : "");
+      b.innerHTML =
+        `<span class="temoji">${ICONS[q.icon] ? svg(ICONS[q.icon]) : q.icon || HOME.emoji}</span>` +
+        `<span class="ttitle">${q.label || `${i + 1}번`}` +
+        (q.tag ? ` <span class="ttag">${q.tag}</span>` : "") +
+        (k in done ? ` <span class="tscore">${done[k]}점</span>` : "") + `</span>` +
+        `<span class="tblurb">${q.hook || q.text}</span>` +
+        `<span class="tgo">${svg('<path d="M4 12h16M14 6l6 6-6 6"/>')}</span>`;
+      b.onclick = () => start(HOME.id, i);
+      $("topic-grid").appendChild(b);
+    });
+    return;
+  }
   const n = INDEX.topics.filter((t) => t.id in done).length;
   $("progress-note").textContent =
     n ? `${INDEX.topics.length}개 중 ${n}개 풀었습니다` : "";
@@ -116,12 +177,20 @@ function renderGrid() {
   });
 }
 
-async function start(id) {
-  PACK = await (await fetch(`topics/${id}.json`)).json();
+async function start(id, qi = null) {
+  PACK = await (await fetch(`topics/${id}.json`, { cache: "no-cache" })).json();
+  if (qi != null && PACK.questions[qi]) {
+    PACK = { ...PACK, questions: [PACK.questions[qi]], qi };
+  }
   idx = 0; answers = [];
-  $("topic-name").textContent = `${PACK.emoji} ${PACK.title}`;
+  $("topic-name").textContent = packName();
   renderQ();
   show("quiz");
+}
+
+function packName() {
+  const q = PACK.qi == null ? null : PACK.questions[0];
+  return `${PACK.emoji} ${PACK.title}` + (q && q.label ? ` · ${q.label}` : "");
 }
 
 /* ── 문항 ────────────────────────────────────────── */
@@ -188,9 +257,9 @@ function renderResult() {
     PACK.questions.map((q, i) => scoreOne(q, answers[i]))
       .reduce((a, b) => a + b, 0) / PACK.questions.length);
   const g = gradeOf(total);
-  markDone(PACK.id, total);
+  markDone(doneId(PACK), total);
 
-  $("result-topic").textContent = `${PACK.emoji} ${PACK.title}`;
+  $("result-topic").textContent = packName();
   $("score").innerHTML = `${total}<span>점</span>`;
   $("grade").textContent = g.name;
   $("grade-emoji").textContent = g.emoji || "";
@@ -286,8 +355,9 @@ async function share() {
   const total = $("score").textContent.replace(/[^0-9]/g, "");
   const grade = $("grade").textContent;
   const url = `${location.origin}${location.pathname}` +
-    `?t=${encodeURIComponent(PACK.id)}&s=${total}&g=${encodeURIComponent(grade)}`;
-  const text = `감 테스트 · ${PACK.title} ${total}점 · ${grade}`;
+    `?t=${encodeURIComponent(PACK.id)}` + (PACK.qi == null ? "" : `&q=${PACK.qi}`) +
+    `&s=${total}&g=${encodeURIComponent(grade)}`;
+  const text = `감 테스트 · ${packName().replace(/^\S+ /, "")} ${total}점 · ${grade}`;
   try {
     if (navigator.share) { await navigator.share({ title: INDEX.title, text, url }); return; }
     await navigator.clipboard.writeText(`${text}\n${url}`);
